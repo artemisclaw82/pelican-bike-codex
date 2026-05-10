@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 from PIL import Image, ImageDraw, ImageFilter
 
 
 WIDTH = 1400
 HEIGHT = 1000
+SUPERSAMPLE = 2
 OUTPUT_PATH = Path("output/pelican_bike.png")
 
 
@@ -16,21 +17,110 @@ Color = tuple[int, int, int] | tuple[int, int, int, int]
 Point = tuple[float, float]
 
 
+class ScaledDraw:
+    """Tiny adapter that keeps drawing code in design pixels while rendering larger."""
+
+    def __init__(self, draw: ImageDraw.ImageDraw, scale: int) -> None:
+        self.draw = draw
+        self.scale = scale
+
+    def _n(self, value: float) -> int:
+        return int(round(value * self.scale))
+
+    def _xy(self, xy: Sequence[float] | Sequence[Point]) -> tuple[int, ...] | list[tuple[int, int]]:
+        if xy and isinstance(xy[0], (tuple, list)):  # type: ignore[index]
+            return [(self._n(x), self._n(y)) for x, y in xy]  # type: ignore[misc]
+        return tuple(self._n(value) for value in xy)  # type: ignore[arg-type]
+
+    def _width(self, width: int) -> int:
+        return max(1, self._n(width))
+
+    def line(
+        self,
+        xy: Sequence[float] | Sequence[Point],
+        fill: Color,
+        width: int = 1,
+        joint: str | None = None,
+    ) -> None:
+        kwargs = {"fill": fill, "width": self._width(width)}
+        if joint is not None:
+            kwargs["joint"] = joint
+        self.draw.line(self._xy(xy), **kwargs)
+
+    def ellipse(
+        self,
+        xy: Sequence[float],
+        fill: Color | None = None,
+        outline: Color | None = None,
+        width: int = 1,
+    ) -> None:
+        self.draw.ellipse(self._xy(xy), fill=fill, outline=outline, width=self._width(width))
+
+    def rectangle(
+        self,
+        xy: Sequence[float],
+        fill: Color | None = None,
+        outline: Color | None = None,
+        width: int = 1,
+    ) -> None:
+        self.draw.rectangle(self._xy(xy), fill=fill, outline=outline, width=self._width(width))
+
+    def polygon(
+        self,
+        xy: Sequence[Point],
+        fill: Color | None = None,
+        outline: Color | None = None,
+        width: int = 1,
+    ) -> None:
+        points = self._xy(xy)
+        self.draw.polygon(points, fill=fill)
+        if outline is not None:
+            self.draw.line([*points, points[0]], fill=outline, width=self._width(width), joint="curve")
+
+    def arc(
+        self,
+        xy: Sequence[float],
+        start: float,
+        end: float,
+        fill: Color,
+        width: int = 1,
+    ) -> None:
+        self.draw.arc(self._xy(xy), start, end, fill=fill, width=self._width(width))
+
+    def pieslice(
+        self,
+        xy: Sequence[float],
+        start: float,
+        end: float,
+        fill: Color | None = None,
+        outline: Color | None = None,
+        width: int = 1,
+    ) -> None:
+        self.draw.pieslice(self._xy(xy), start, end, fill=fill, outline=outline, width=self._width(width))
+
+
 def ellipse_bbox(cx: float, cy: float, rx: float, ry: float) -> tuple[float, float, float, float]:
     return (cx - rx, cy - ry, cx + rx, cy + ry)
 
 
-def add_shadow(base: Image.Image, shape: Image.Image, blur: int, offset: tuple[int, int], opacity: int) -> None:
-    alpha = shape.getchannel("A").filter(ImageFilter.GaussianBlur(blur))
+def add_shadow(
+    base: Image.Image,
+    shape: Image.Image,
+    blur: int,
+    offset: tuple[int, int],
+    opacity: int,
+    scale: int,
+) -> None:
+    alpha = shape.getchannel("A").filter(ImageFilter.GaussianBlur(blur * scale))
     shadow = Image.new("RGBA", base.size, (31, 40, 46, opacity))
     shifted = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    shifted.paste(shadow, offset, alpha)
+    shifted.paste(shadow, (offset[0] * scale, offset[1] * scale), alpha)
     base.alpha_composite(shifted)
     base.alpha_composite(shape)
 
 
 def draw_polyline(
-    draw: ImageDraw.ImageDraw,
+    draw: ScaledDraw,
     points: Sequence[Point],
     fill: Color,
     width: int,
@@ -39,7 +129,7 @@ def draw_polyline(
     draw.line(points, fill=fill, width=width, joint=joint)
 
 
-def draw_spokes(draw: ImageDraw.ImageDraw, center: Point, radius: int, count: int = 28) -> None:
+def draw_spokes(draw: ScaledDraw, center: Point, radius: int, count: int = 32) -> None:
     cx, cy = center
     for i in range(count):
         angle = (math.tau / count) * i
@@ -48,15 +138,17 @@ def draw_spokes(draw: ImageDraw.ImageDraw, center: Point, radius: int, count: in
         draw.line((cx, cy, x, y), fill=(125, 139, 146), width=2)
 
 
-def draw_wheel(draw: ImageDraw.ImageDraw, center: Point, radius: int) -> None:
+def draw_wheel(draw: ScaledDraw, center: Point, radius: int) -> None:
     cx, cy = center
     draw.ellipse(ellipse_bbox(cx, cy, radius + 9, radius + 9), outline=(42, 54, 58), width=16)
+    draw.ellipse(ellipse_bbox(cx, cy, radius + 2, radius + 2), outline=(30, 38, 42), width=4)
     draw.ellipse(ellipse_bbox(cx, cy, radius - 2, radius - 2), outline=(207, 218, 221), width=5)
     draw_spokes(draw, center, radius - 12)
+    draw.ellipse(ellipse_bbox(cx, cy, radius - 52, radius - 52), outline=(187, 199, 203), width=3)
     draw.ellipse(ellipse_bbox(cx, cy, 17, 17), fill=(66, 82, 90), outline=(237, 243, 242), width=4)
 
 
-def draw_background(draw: ImageDraw.ImageDraw) -> None:
+def draw_background(draw: ScaledDraw) -> None:
     for y in range(HEIGHT):
         t = y / HEIGHT
         r = int(148 + (246 - 148) * t)
@@ -88,7 +180,7 @@ def draw_background(draw: ImageDraw.ImageDraw) -> None:
         draw.line((x, 745, x + 7, 745 - h), fill=(73, 120, 83), width=3)
 
 
-def draw_bicycle(draw: ImageDraw.ImageDraw) -> None:
+def draw_bicycle(draw: ScaledDraw) -> None:
     rear = (455, 720)
     front = (930, 720)
     crank = (660, 710)
@@ -107,18 +199,21 @@ def draw_bicycle(draw: ImageDraw.ImageDraw) -> None:
     draw_polyline(draw, (rear, crank, front, fork_top, seat, rear), frame, 11)
     draw_polyline(draw, (seat, crank), frame, 13)
     draw_polyline(draw, (seat, handle), frame, 12)
-    draw.line((fork_top, front[0], front[1]), fill=metal, width=12)
+    draw.line((*fork_top, *front), fill=metal, width=12)
     draw.line((fork_top[0] - 20, fork_top[1] - 22, handle[0] + 55, handle[1] - 18), fill=metal, width=11)
     draw.arc((handle[0] + 28, handle[1] - 54, handle[0] + 112, handle[1] + 30), 195, 330, fill=metal, width=11)
 
-    draw.line((seat[0] - 42, seat[1] - 14, seat[0] + 50, seat[1] - 18), fill=(73, 60, 52), width=17)
+    draw.line((seat[0] - 46, seat[1] - 18, seat[0] + 56, seat[1] - 22), fill=(73, 60, 52), width=22)
+    draw.line((seat[0] - 31, seat[1] - 26, seat[0] + 45, seat[1] - 28), fill=(98, 81, 69), width=9)
     draw.line((seat[0] - 5, seat[1] - 12, seat[0], seat[1] + 44), fill=metal, width=9)
 
+    draw.ellipse(ellipse_bbox(crank[0], crank[1], 38, 38), outline=(221, 211, 177), width=5)
     draw.ellipse(ellipse_bbox(crank[0], crank[1], 34, 34), outline=(50, 63, 67), width=9)
     draw.line((crank[0] - 7, crank[1] + 3, crank[0] - 72, crank[1] + 52), fill=metal, width=8)
     draw.line((crank[0] + 8, crank[1] - 4, crank[0] + 78, crank[1] - 62), fill=metal, width=8)
     draw.line((crank[0] - 100, crank[1] + 72, crank[0] - 52, crank[1] + 36), fill=(54, 65, 69), width=8)
     draw.line((crank[0] + 56, crank[1] - 82, crank[0] + 108, crank[1] - 52), fill=(54, 65, 69), width=8)
+    draw.ellipse(ellipse_bbox(crank[0], crank[1], 10, 10), fill=(238, 242, 236), outline=(50, 63, 67), width=3)
 
 
 def feather_polygon(cx: float, cy: float, angle: float, length: float, width: float) -> list[Point]:
@@ -128,7 +223,7 @@ def feather_polygon(cx: float, cy: float, angle: float, length: float, width: fl
     return [left, tip, right]
 
 
-def draw_wing(draw: ImageDraw.ImageDraw) -> None:
+def draw_wing(draw: ScaledDraw) -> None:
     wing_shadow = (189, 196, 190)
     wing = (248, 247, 236)
     edge = (214, 219, 210)
@@ -145,7 +240,14 @@ def draw_wing(draw: ImageDraw.ImageDraw) -> None:
     draw.arc((500, 413, 695, 590), 120, 245, fill=(225, 228, 218), width=5)
 
 
-def draw_pelican(draw: ImageDraw.ImageDraw) -> None:
+def draw_webbed_foot(draw: ScaledDraw, ankle: Point, toes: Sequence[Point]) -> None:
+    foot = [(ankle[0] - 7, ankle[1]), *toes, (ankle[0] + 8, ankle[1] + 7)]
+    draw.polygon(foot, fill=(202, 92, 55), outline=(158, 72, 49))
+    for toe in toes:
+        draw.line((ankle[0], ankle[1] + 2, toe[0], toe[1]), fill=(155, 70, 47), width=2)
+
+
+def draw_pelican(draw: ScaledDraw) -> None:
     body = (246, 245, 232)
     body_shadow = (219, 222, 211)
     ink = (39, 47, 49)
@@ -157,12 +259,15 @@ def draw_pelican(draw: ImageDraw.ImageDraw) -> None:
     draw.ellipse((530, 384, 790, 622), fill=body, outline=(210, 215, 205), width=4)
     draw_wing(draw)
 
-    draw.line((616, 590, 590, 690), fill=leg, width=15)
-    draw.line((696, 584, 742, 642), fill=leg, width=15)
-    draw.line((590, 690, 552, 746), fill=leg, width=12)
-    draw.line((742, 642, 768, 602), fill=leg, width=12)
-    draw.line((534, 747, 582, 747), fill=(194, 88, 54), width=9)
-    draw.line((752, 599, 805, 599), fill=(194, 88, 54), width=9)
+    draw.line((560, 558, 666, 553), fill=(73, 60, 52), width=18)
+    draw.line((580, 546, 650, 543), fill=(106, 86, 72), width=6)
+    draw.ellipse((580, 520, 700, 585), fill=(235, 235, 222), outline=(207, 212, 202), width=3)
+    draw.line((618, 575, 590, 690), fill=leg, width=16)
+    draw.line((698, 570, 742, 642), fill=leg, width=16)
+    draw.line((590, 690, 552, 746), fill=leg, width=13)
+    draw.line((742, 642, 758, 650), fill=leg, width=13)
+    draw_webbed_foot(draw, (552, 746), [(522, 755), (560, 766), (592, 752)])
+    draw_webbed_foot(draw, (758, 650), [(725, 650), (760, 666), (793, 649)])
 
     neck_points = [(720, 408), (760, 315), (838, 295), (898, 338), (878, 410), (790, 432)]
     draw.line(neck_points, fill=body_shadow, width=75, joint="curve")
@@ -180,12 +285,14 @@ def draw_pelican(draw: ImageDraw.ImageDraw) -> None:
     draw.line((948, 358, 1208, 360), fill=(147, 89, 49), width=4)
     draw.line((1213, 333, 1233, 362), fill=(103, 77, 48), width=4)
     draw.arc((943, 344, 1158, 433), 8, 168, fill=(212, 150, 82), width=4)
+    draw.arc((952, 371, 1128, 439), 10, 172, fill=(183, 116, 65), width=3)
+    draw.line((930, 397, 1126, 423), fill=(222, 166, 94), width=3)
 
     draw.ellipse((510, 560, 572, 610), fill=(230, 229, 217))
     draw.polygon([(765, 602), (820, 646), (742, 648)], fill=(226, 229, 219), outline=(205, 211, 201))
 
 
-def draw_foreground(draw: ImageDraw.ImageDraw) -> None:
+def draw_foreground(draw: ScaledDraw) -> None:
     draw.ellipse((285, 825, 1032, 900), fill=(112, 89, 67, 82))
     for x, y, color in [
         (210, 870, (230, 180, 88)),
@@ -200,20 +307,23 @@ def draw_foreground(draw: ImageDraw.ImageDraw) -> None:
 
 
 def render() -> Image.Image:
-    image = Image.new("RGBA", (WIDTH, HEIGHT), (255, 255, 255, 255))
-    draw = ImageDraw.Draw(image, "RGBA")
+    scale = SUPERSAMPLE
+    render_size = (WIDTH * scale, HEIGHT * scale)
+    image = Image.new("RGBA", render_size, (255, 255, 255, 255))
+    draw = ScaledDraw(ImageDraw.Draw(image, "RGBA"), scale)
     draw_background(draw)
 
     bicycle_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    draw_bicycle(ImageDraw.Draw(bicycle_layer, "RGBA"))
-    add_shadow(image, bicycle_layer, blur=10, offset=(18, 26), opacity=80)
+    draw_bicycle(ScaledDraw(ImageDraw.Draw(bicycle_layer, "RGBA"), scale))
+    add_shadow(image, bicycle_layer, blur=10, offset=(18, 26), opacity=80, scale=scale)
 
     bird_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    draw_pelican(ImageDraw.Draw(bird_layer, "RGBA"))
-    add_shadow(image, bird_layer, blur=13, offset=(16, 21), opacity=54)
+    draw_pelican(ScaledDraw(ImageDraw.Draw(bird_layer, "RGBA"), scale))
+    add_shadow(image, bird_layer, blur=13, offset=(16, 21), opacity=54, scale=scale)
 
-    draw_foreground(ImageDraw.Draw(image, "RGBA"))
-    return image.convert("RGB")
+    draw_foreground(ScaledDraw(ImageDraw.Draw(image, "RGBA"), scale))
+    resampling = getattr(Image, "Resampling", Image).LANCZOS
+    return image.resize((WIDTH, HEIGHT), resampling).convert("RGB")
 
 
 def main() -> None:
